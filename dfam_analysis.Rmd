@@ -1,0 +1,236 @@
+---
+title: "250905 Tobi Dfam repeats in subtelomere"
+output: html_notebook
+---
+
+
+```{bash}
+#working directory 
+cd /gpfs/analyses/april/KARLSEDER/tobi/250905_dfam
+
+#download Dfam currated motifs for hmmer
+#Dfam release 3.9 (March 2025)
+wget https://dfam.org/releases/current/families/Dfam-curated_only-1.hmm.gz
+
+#pull latest dfam toolset from singularity
+#nhmmscan HMMER 3.4 (Aug 2023); http://hmmer.org/
+singularity pull dfam-tetools-latest.sif docker://dfam/tetools:latest
+singularity run dfam-tetools-latest.sif
+
+#within the singularity image
+#modify the PATH to include the required tools nhmmer and trf are included
+PATH=/opt/hmmer/bin:/opt/trf:$PATH
+
+#prepare database for searching
+gunzip Dfam-curated_only-1.hmm.gz
+#press the uncompressed database
+hmmpress Dfam-curated_only-1.hmm 
+
+#move pressed db to it's own directory
+mkdir Dfam-curated-only-1-hmm
+mv Dfam-curated* Dfam-curated-only-1-hmm/
+
+#convert Kat's telomere fastqs to fastq format
+sed -n '1~4s/^@/>/p;2~4p' IMR90SVtelo_reads.fq > IMR90SVtelo_reads.fasta
+sed -n '1~4s/^@/>/p;2~4p' IMR90ALTtelo_reads.fq > IMR90ALTtelo_reads.fasta
+
+```
+
+```{bash IMR90SV nhmmscan}
+wc -l IMR90SVtelo_reads.fasta
+#18076 telomere sequences in this file 
+
+nhmmscan --noali --tblout IMR90SVtelo_tbl.out --cpu=56 Dfam-curated-only-1-hmm/Dfam-curated_only-1.hmm IMR90SVtelo_reads.fasta
+```
+
+
+```{bash IMR90ALT nhmmscan}
+wc -l IMR90ALTtelo_reads.fasta
+#8996 IMR90ALTtelo_reads.fasta
+
+nhmmscan --noali --tblout IMR90ALTtelo_tbl.out --cpu=56 Dfam-curated-only-1-hmm/Dfam-curated_only-1.hmm IMR90ALTtelo_reads.fasta
+```
+
+
+```{bash awk file unique_readsv2.awk}
+# AWK script to count the number of *distinct* reads that contain at least one occurrence
+# of each tandem motif, and calculate the percentage of total unique reads they represent.
+# This version skips the first 2 and last 10 lines of the input file.
+
+# Array 'read_names': Stores $1 (Read Name) for all lines. Index is NR.
+# Array 'motif_names': Stores $2 (Motif Name) for all lines. Index is NR.
+# Array 'count': used for deduping (Motif, Read) pairs.
+# Array 'all_reads': used to find the total number of unique reads (the denominator).
+
+{
+    # 1. Store the data for all lines in memory.
+    # This prepares the data to be processed later, allowing us to reference the total line count (NR).
+    read_names[NR] = $3
+    motif_names[NR] = $1
+}
+
+# The END block runs after all input lines have been processed.
+END {
+    # Define the range of lines to process: from line 3 up to NR - 10 (inclusive).
+    # Lines 1 and 2 are skipped. The last 10 lines (NR-9 through NR) are skipped.
+    start_line = 3
+    end_line = NR - 10
+
+    # Safety check: ensure there are enough lines to process (i.e., NR >= 13)
+    if (end_line < start_line) {
+        # Print error message to stderr (>&2) and exit gracefully.
+        print "Error: Input file has only " NR " lines. Need at least 13 lines to skip first 2 and last 10." | "cat >&2"
+        exit 1
+    }
+
+    # Process only the lines within the required range [3, NR - 10]
+    for (i = start_line; i <= end_line; i++) {
+        read_name = read_names[i]
+        motif_name = motif_names[i]
+
+        # Deduplicate by (Motif, Read) pair for per-motif counting
+        count[motif_name, read_name] = 1
+
+        # Track all unique read names globally for the denominator calculation
+        all_reads[read_name] = 1
+    }
+
+    # Determine the total number of unique reads found in the processed range.
+    total_unique_reads = length(all_reads)
+
+    # Re-aggregate the distinct read counts per motif from the 'count' array
+    for (key in count) {
+        # Split the composite key back into its two components: Motif and Read.
+        # The key is "MotifSUBSEPRead"
+        split(key, parts, SUBSEP)
+        final_counts[parts[1]]++
+    }
+
+    # Print the final report header
+    printf "%-25s %-15s %-10s\n", "TANDEM MOTIF", "DISTINCT READS", "PERCENT (%)"
+    print "------------------------- --------------- ----------"
+
+    # Iterate through the final sum array, calculate percentage, and print
+    for (motif in final_counts) {
+        motif_count = final_counts[motif]
+
+        # Check if total_unique_reads is 0 to avoid division by zero
+        if (total_unique_reads > 0) {
+            # Calculate percentage: (Motif Reads / Total Reads) * 100
+            percentage = (motif_count / total_unique_reads) * 100
+        } else {
+            percentage = 0.00
+        }
+
+        # Print the results, formatting the percentage to two decimal places
+        printf "%-25s %15d %10.2f\n", motif, motif_count, percentage
+    }
+
+    print "------------------------- --------------- ----------"
+    printf "PROCESSED LINE RANGE: %d through %d\n", start_line, end_line
+    printf "TOTAL UNIQUE READS (in range): %d\n", total_unique_reads
+}
+
+```
+
+
+```{bash IMR90ALT}
+#IMR90ALT
+
+#total number of telomere containing reads: 
+wc -l IMR90ALTtelo_reads.fasta 
+#8996 IMR90ALTtelo_reads.fasta -> 4498 reads
+
+#total instances of motifs found 
+wc -l IMR90ALTtelo_tbl.out
+#9582168 IMR90ALTtelo_tbl.out
+
+#total number of unique motifs found
+awk 'NR > 2 {seen[$1]++} END {print length(seen)}' IMR90ALTtelo_tbl.out
+#9325 unique targets
+
+#create count table of 9325 unique motifs
+awk 'NR > 2 { count[$1]++ } END { for (value in count) print value, count[value] }' IMR90ALTtelo_tbl.out  > IMR90ALTtelo_counts.txt
+wc -l IMR90ALTtelo_counts.txt
+#9325 IMR90ALTtelo_counts.txt
+
+#get number of reads that contain at least one count of a given motif
+awk -f unique_readsv2.awk IMR90ALTtelo_tbl.out > IMR90ALTtelo_motif_unique_read_counts.txt
+
+```
+
+```{bash IMR90SV }
+#IMR90SV
+
+#total number of telomere containing reads
+wc -l IMR90SVtelo_reads.fasta 
+#18076 IMR90SVtelo_reads.fasta -> 9038 telomere containing long reads
+
+#total instances of motifs found
+wc -l IMR90SVtelo_tbl.out
+#17139630 IMR90SVtelo_tbl.out
+
+#how many unique motifs found 
+awk 'NR > 2 {seen[$1]++} END {print length(seen)}' IMR90SVtelo_tbl.out 
+#7547 unique targets
+
+#create count table of 7547 unique motifs
+awk 'NR > 2 { count[$1]++ } END { for (value in count) print value, count[value] }' IMR90SVtelo_tbl.out  > IMR90SVtelo_counts.txt
+wc -l IMR90SVtelo_counts.txt
+#7547 IMR90SVtelo_counts.txt
+
+#get number of reads that contain at least one count of a given motif
+awk -f unique_readsv2.awk IMR90SVtelo_tbl.out > IMR90SVtelo_motif_unique_read_counts.txt
+
+```
+
+
+
+```{r make Venn diagrams}
+setwd("/gpfs/analyses/april/KARLSEDER/tobi/250905_dfam")
+library(VennDiagram)
+
+#9325 elements
+IMR90ALT <- read.delim("/gpfs/analyses/april/KARLSEDER/tobi/250905_dfam/IMR90ALTtelo_counts.txt",sep=" ",stringsAsFactors = F,header=F)
+#7547 elements
+IMRSV <- read.delim("/gpfs/analyses/april/KARLSEDER/tobi/250905_dfam/IMR90SVtelo_counts.txt",sep=" ",stringsAsFactors = F,header=F)
+
+table(IMR90ALT$V1 %in% IMRSV$V1)
+#FALSE  TRUE 
+# 2780  6545 
+#a lot overlap but some unique to both 
+
+overlap <- list(IMR90ALT$V1, IMRSV$V1)
+
+venn.diagram(x =overlap,category.names = c("IMR90ALT","IMR90SV"),
+                 filename = "IMR90ALT_IMR90SV_DFAM_venn.png",
+                 main = "Overlap of DFAM TRF Motifs",imagetype = 'png')
+
+names(overlap) <- c("IMR90ALT","IMR90SV")
+VennDiagram_obj <- get.venn.partitions(x = overlap)
+simpleVennCSV(VennDiagram_obj, nam="IMR90ALT_IMR90SV_DFAM_venn")
+```
+
+```{r simpleVennCSV function}
+
+simpleVennCSV <- function(VennDiagram_obj,nam){
+  if (length(VennDiagram_obj$..count..) == 31 | length(VennDiagram_obj$..count..) == 7 | length(VennDiagram_obj$..count..) == 3 | length(VennDiagram_obj$..count..) == 15) {
+    l <- lapply(X=1:length(VennDiagram_obj$..count..),FUN=function(x){
+      if(length(as.data.frame(VennDiagram_obj$..values..[x])[,1]) > 0){
+        setX <- data.frame(gene = as.data.frame(VennDiagram_obj$..values..[x])[,1],
+                           set = rep(VennDiagram_obj$..set..[x],length(VennDiagram_obj$..values..[x])))} else{
+                             setX <- data.frame(gene = "NA",
+                                                set = rep(VennDiagram_obj$..set..[x],length(VennDiagram_obj$..values..[x])))}
+      return(setX)
+    })
+
+    venn_overlap <- do.call("rbind", l)
+
+    write.csv(x = venn_overlap, file = sprintf("%s_venn.csv",nam), quote = F, row.names = F)
+    #openxlsx::write.xlsx(x = venn_overlap,file = sprintf("%s_venn.xlsx",nam),firstRow=T,keepNA=T)
+  }else{
+    print("Invalid Venn diagram object.")
+  }
+}
+```
+
